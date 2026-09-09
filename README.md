@@ -8,6 +8,13 @@
 
 ![teaser_figure](assets/architecture.png)
 
+## Updates
+
+- Fixed predictor sizing for the global projector (`encoder=dino_global`): `latent_ndim` is now final at construction, restoring the causal mask during training. The affected Table 1 row (`DINOv2 (patch) + proj, 1×384`) improves and the paper's conclusion still holds — see [UPDATES.md](UPDATES.md#dinov2-patch--global-projector-predictor-sizing-modelsdinopy) for details and re-run numbers.
+- Fixed the PushT success check: the angle difference is normalized before the shortest-arc comparison. Only randomly sampled goals were affected; dataset goals (the paper's protocol) store wrapped angles and were never affected.
+- Fixed train/val split integrity: during code migration, the fast paths added to `TrajSlicerDataset` (`load_visual_frames` / `get_frames`) read episodes by attribute access, bypassing the subset's index map, so random train/val splits overlapped during training; they now read through the map. To be safe, we retrained every model with the fix and [fully reproduce the reported results](UPDATES.md#full-table).
+- Added the `scratch_resnet_gem` encoder (ResNet + learnable GeM pooling) from the AdaJEPA release — the encoder behind the paper's pusht `ResNet (scratch), 1×384` cells, which leads to better performance than the default ResNet global features (see [UPDATES.md](UPDATES.md#resnet-scratch-1384-on-pusht-two-encoders)).
+- Restored the `env/wall/data` package that a `.gitignore` pattern had kept out of the release; wall planning runs previously failed at import.
 
 ## Getting Started
 
@@ -92,14 +99,17 @@ encoder=dino training.straighten=False
 # DINOv2(patch) + channel projector
 encoder=dino_channel training.straighten=[False|aggcos1e-1]
 
-# DINOv2(patch) + global projector
-encoder=dino_global training.straighten=[False|cos1e-1]
+# DINOv2(patch) + global projector (λ selected on validation: wall/medium cos1e-1, umaze/pusht cos1e-2)
+encoder=dino_global training.straighten=[False|cos1e-1|cos1e-2]
 
 # ResNet spatial features (from scratch)
 encoder=scratch_resnet_spatial training.straighten=[False|aggcos1e-1]
 
-# ResNet global features (from scratch)
-encoder=scratch_resnet training.straighten=[False|cos1e-1]
+# ResNet global features (from scratch; λ selected on validation: wall/umaze cos1e-1, medium cos1e-2)
+encoder=scratch_resnet training.straighten=[False|cos1e-1|cos1e-2]
+
+# ResNet global features with GeM pooling (from scratch; used for pusht, λ selected on validation: cos1e-2)
+encoder=scratch_resnet_gem training.straighten=[False|cos1e-2] 
 ```
 
 Straightening options:
