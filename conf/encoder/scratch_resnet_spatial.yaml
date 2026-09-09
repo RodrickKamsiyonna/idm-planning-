@@ -1,5 +1,5 @@
 _target_: models.encoder.resnet.ResNetSpatial
-dim: 384
-agg_type: flatten
-agg_out_dim: 32
+dim: 8
+agg_type: mlp
+agg_out_dim: 128
 agg_mlp_hidden_dim: 512
