@@ -15,6 +15,8 @@
 - Fixed train/val split integrity: during code migration, the fast paths added to `TrajSlicerDataset` (`load_visual_frames` / `get_frames`) read episodes by attribute access, bypassing the subset's index map, so random train/val splits overlapped during training; they now read through the map. To be safe, we retrained every model with the fix and [fully reproduce the reported results](UPDATES.md#full-table).
 - Added the `scratch_resnet_gem` encoder (ResNet + learnable GeM pooling) from the AdaJEPA release — the encoder behind the paper's pusht `ResNet (scratch), 1×384` cells, which leads to better performance than the default ResNet global features (see [UPDATES.md](UPDATES.md#resnet-scratch-1384-on-pusht-two-encoders)).
 - Restored the `env/wall/data` package that a `.gitignore` pattern had kept out of the release; wall planning runs previously failed at import.
+- Reproduced checkpoints (2026/09/10) are released [here](https://drive.google.com/drive/folders/1A2LzRY3BcXvM-vjafqyZy2BC3s_185br?usp=sharing).
+- Medium maze data can be found [here](https://drive.google.com/file/d/1GjOsWUnCSa84ybti17aruMoUFR7DA_tG/view?usp=sharing). Due to storage limit, we only upload states and you will need to render them locally. We will have a better way to share data and checkpoints soon. 
 
 ## Getting Started
 
