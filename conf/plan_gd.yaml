@@ -40,7 +40,11 @@ objective:
   alpha: 0
   base: 2 
   mode: last
-
+  
+idm:
+  ckpt_path: /kaggle/working/idm-planning-/outputs/YOUR_IDM_RUN/checkpoints/model_latest.pth
+  weight: 0.1
+  
 planner:
   _target_: planning.mpc.MPCPlanner
   max_iter: 1
