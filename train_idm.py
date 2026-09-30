@@ -174,7 +174,7 @@ class IDMTrainer:
         ckpt_path = self.pretrained_dir / "checkpoints" / ckpt_name
         ckpt = {}
         if ckpt_path.exists():
-            ckpt = torch.load(ckpt_path, map_location="cpu")
+            ckpt = torch.load(ckpt_path,map_location="cpu",weights_only=False,)
             log.info(f"Loaded pretrained world-model checkpoint from {ckpt_path}")
         else:
             log.warning(
@@ -289,7 +289,7 @@ class IDMTrainer:
             log.info(f"Saved IDM checkpoint (step {self.step}) to {os.getcwd()}")
 
     def _load_idm_ckpt(self, path):
-        ckpt = torch.load(path, map_location="cpu")
+        ckpt = torch.load(path, map_location="cpu",weights_only=False)
         self.step = ckpt.get("step", 0)
         if "idm" in ckpt:
             self.idm = self.accelerator.prepare(ckpt["idm"])
