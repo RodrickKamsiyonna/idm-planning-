@@ -113,14 +113,13 @@ class IDMTrainer:
         self._build_idm()
         self._init_optimizer()
 
-        self.epoch = 0
-        self.total_epochs = cfg.idm.epochs
-        self._keys_to_save = ["epoch", "idm", "idm_optimizer"]
+        self.step = 0
+        self.total_steps = cfg.idm.total_steps
 
         idm_ckpt = Path(cfg.saved_folder) / "checkpoints" / "model_latest.pth"
         if idm_ckpt.exists():
             self._load_idm_ckpt(idm_ckpt)
-            log.info(f"Resuming IDM training from epoch {self.epoch}: {idm_ckpt}")
+            log.info(f"Resuming IDM training from step {self.step}: {idm_ckpt}")
 
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
@@ -142,7 +141,7 @@ class IDMTrainer:
             with open(os.path.join(os.getcwd(), "hydra.yaml"), "w") as f:
                 f.write(OmegaConf.to_yaml(cfg, resolve=True))
 
-        self.epoch_log = OrderedDict()
+        self.step_log = OrderedDict()
 
     # ------------------------------------------------------------------
     # pretrained (frozen) world-model components
@@ -270,17 +269,17 @@ class IDMTrainer:
         if self.accelerator.is_main_process:
             os.makedirs("checkpoints", exist_ok=True)
             ckpt = {
-                "epoch": self.epoch,
+                "step": self.step,
                 "idm": self.accelerator.unwrap_model(self.idm),
                 "idm_optimizer": self.idm_optimizer.state_dict(),
             }
             torch.save(ckpt, "checkpoints/model_latest.pth")
-            torch.save(ckpt, f"checkpoints/model_{self.epoch}.pth")
-            log.info(f"Saved IDM checkpoint to {os.getcwd()}")
+            torch.save(ckpt, f"checkpoints/model_step{self.step}.pth")
+            log.info(f"Saved IDM checkpoint (step {self.step}) to {os.getcwd()}")
 
     def _load_idm_ckpt(self, path):
         ckpt = torch.load(path, map_location="cpu")
-        self.epoch = ckpt.get("epoch", 0)
+        self.step = ckpt.get("step", 0)
         if "idm" in ckpt:
             self.idm = self.accelerator.prepare(ckpt["idm"])
             self.idm_raw = self.accelerator.unwrap_model(self.idm)
@@ -292,7 +291,23 @@ class IDMTrainer:
                 log.warning(f"Failed to load IDM optimizer state: {e}")
 
     # ------------------------------------------------------------------
-    # train / val
+    # data
+    # ------------------------------------------------------------------
+    def _next_train_batch(self):
+        """
+        Pulls the next batch, transparently restarting the iterator when
+        the dataset is exhausted. Deliberately NOT itertools.cycle, which
+        caches every yielded item the first time through -- fine for a
+        small dataset, a memory blow-up for a large one.
+        """
+        try:
+            return next(self._train_iter)
+        except StopIteration:
+            self._train_iter = iter(self.dataloaders["train"])
+            return next(self._train_iter)
+
+    # ------------------------------------------------------------------
+    # loss
     # ------------------------------------------------------------------
     def compute_loss(self, obs, act):
         """
@@ -317,63 +332,93 @@ class IDMTrainer:
         loss = nn.functional.mse_loss(pred_act, target_act)
         return loss
 
-    def train(self):
-        self.idm.train()
-        for i, data in enumerate(
-            tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} IDM train")
-        ):
+    # ------------------------------------------------------------------
+    # validation (capped number of batches -- not a full pass, since the
+    # dataset is assumed large)
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def val(self):
+        self.idm.eval()
+        max_batches = self.cfg.idm.get("val_batches", 50) or None  # None/0 -> full pass
+        val_iter = iter(self.dataloaders["valid"])
+        total, count = 0.0, 0
+        for i, data in enumerate(val_iter):
+            if max_batches is not None and i >= max_batches:
+                break
             obs, act, state = data
+            loss = self.compute_loss(obs, act)
+            loss = self.accelerator.gather_for_metrics(loss).mean()
+            total += loss.item()
+            count += 1
+        val_loss = total / max(count, 1)
+        log.info(f"step {self.step}  val_idm_loss: {val_loss:.4f} (over {count} batches)")
+        if self.accelerator.is_main_process:
+            self.wandb_run.log({"val_idm_loss": val_loss, "step": self.step})
+        self.idm.train()
+
+    # ------------------------------------------------------------------
+    # logging
+    # ------------------------------------------------------------------
+    def logs_update(self, logs):
+        for key, value in logs.items():
+            length = len(value)
+            count, total = self.step_log.get(key, (0, 0.0))
+            self.step_log[key] = (count + length, total + sum(value))
+
+    def logs_flash(self):
+        flat = OrderedDict()
+        for key, (count, total) in self.step_log.items():
+            flat[key] = total / count
+        flat["step"] = self.step
+        log.info(
+            f"step {self.step}  train_idm_loss: "
+            f"{flat.get('train_idm_loss', float('nan')):.4f}"
+        )
+        if self.accelerator.is_main_process:
+            self.wandb_run.log(flat)
+        self.step_log = OrderedDict()
+
+    # ------------------------------------------------------------------
+    # main loop
+    # ------------------------------------------------------------------
+    def run(self):
+        self._train_iter = iter(self.dataloaders["train"])
+        self.idm.train()
+        pbar = tqdm(
+            total=self.total_steps,
+            initial=self.step,
+            desc="IDM train",
+            disable=not self.accelerator.is_main_process,
+        )
+        while self.step < self.total_steps:
+            obs, act, state = self._next_train_batch()
             loss = self.compute_loss(obs, act)
 
             self.idm_optimizer.zero_grad()
             self.accelerator.backward(loss)
             self.idm_optimizer.step()
 
-            loss = self.accelerator.gather_for_metrics(loss).mean()
-            self.logs_update({"train_idm_loss": [loss.item()]})
+            self.step += 1
+            pbar.update(1)
 
-    @torch.no_grad()
-    def val(self):
-        self.idm.eval()
-        for i, data in enumerate(
-            tqdm(self.dataloaders["valid"], desc=f"Epoch {self.epoch} IDM valid")
-        ):
-            obs, act, state = data
-            loss = self.compute_loss(obs, act)
-            loss = self.accelerator.gather_for_metrics(loss).mean()
-            self.logs_update({"val_idm_loss": [loss.item()]})
+            loss_val = self.accelerator.gather_for_metrics(loss).mean().item()
+            self.logs_update({"train_idm_loss": [loss_val]})
+            pbar.set_postfix(loss=f"{loss_val:.4f}")
 
-    def logs_update(self, logs):
-        for key, value in logs.items():
-            length = len(value)
-            count, total = self.epoch_log.get(key, (0, 0.0))
-            self.epoch_log[key] = (count + length, total + sum(value))
+            if self.step % self.cfg.idm.log_every_x_steps == 0:
+                self.logs_flash()
 
-    def logs_flash(self, step):
-        flat = OrderedDict()
-        for key, (count, total) in self.epoch_log.items():
-            flat[key] = total / count
-        flat["epoch"] = step
-        log.info(
-            f"Epoch {self.epoch}  IDM train loss: "
-            f"{flat.get('train_idm_loss', float('nan')):.4f}  "
-            f"val loss: {flat.get('val_idm_loss', float('nan')):.4f}"
-        )
-        if self.accelerator.is_main_process:
-            self.wandb_run.log(flat)
-        self.epoch_log = OrderedDict()
+            if self.step % self.cfg.idm.val_every_x_steps == 0:
+                self.accelerator.wait_for_everyone()
+                self.val()
+                self.accelerator.wait_for_everyone()
 
-    def run(self):
-        init_epoch = self.epoch + 1
-        for epoch in range(init_epoch, init_epoch + self.total_epochs):
-            self.epoch = epoch
-            self.accelerator.wait_for_everyone()
-            self.train()
-            self.accelerator.wait_for_everyone()
-            self.val()
-            self.logs_flash(step=self.epoch)
-            if self.epoch % self.cfg.idm.save_every_x_epoch == 0:
+            if self.step % self.cfg.idm.save_every_x_steps == 0:
                 self.save_ckpt()
+
+        pbar.close()
+        self.logs_flash()
+        self.save_ckpt()
 
 
 @hydra.main(config_path="conf", config_name="train_idm")
