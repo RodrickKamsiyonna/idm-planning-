@@ -147,16 +147,27 @@ class IDMTrainer:
     # pretrained (frozen) world-model components
     # ------------------------------------------------------------------
     def _load_pretrained_cfg(self):
-        pretrained_dir = Path(self.cfg.idm.pretrained_run_dir)
+        pretrained_dir = Path(
+            self.cfg.idm.pretrained_run_dir
+        ).expanduser().resolve()
+    
         cfg_path = pretrained_dir / "hydra.yaml"
+    
         if not cfg_path.exists():
             raise FileNotFoundError(
                 f"{cfg_path} not found -- idm.pretrained_run_dir must be the "
                 "output directory of a completed world-model training run "
                 "(it must contain hydra.yaml and checkpoints/)."
             )
-        return OmegaConf.load(cfg_path), pretrained_dir
-
+    
+        pretrained_cfg = OmegaConf.load(cfg_path)
+    
+        data_path = self.cfg.idm.get("data_path", None)
+    
+        if data_path is not None:
+            with open_dict(pretrained_cfg):
+                pretrained_cfg.env.dataset.data_path = data_path
+        return pretrained_cfg, pretrained_dir
     def _build_frozen_encoders(self):
         pcfg = self.pretrained_cfg
         ckpt_name = self.cfg.idm.get("pretrained_ckpt_name", "model_latest.pth")
