@@ -123,7 +123,7 @@ class GDPlanner(BasePlanner):
                 obs_0=trans_obs_0,
                 act=actions,
             )
-            loss = self.objective_fn(i_z_obses, z_obs_g, step=step)  # (n_evals, )
+            loss = self.objective_fn(i_z_obses,z_obs_g,step=step, actions=actions,)  # (n_evals, )
             total_loss = loss.mean() * n_evals  # loss for each eval is independent
             total_loss.backward()
             optimizer.step()
