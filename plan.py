@@ -138,9 +138,23 @@ class PlanWorkspace:
         self.goal_H = cfg_dict["goal_H"]
         self.action_dim = self.dset.action_dim * self.frameskip
         self.debug_dset_init = cfg_dict["debug_dset_init"]
-
+        
+        idm_cfg = cfg_dict.get("idm", {})
+        idm_ckpt_path = idm_cfg.get("ckpt_path", None)
+        idm_weight = float(idm_cfg.get("weight", 0.0))
+        
+        self.idm = None
+        
+        if idm_ckpt_path:
+            self.idm = load_idm(
+                idm_ckpt_path,
+                self.device,
+            )
+        
         objective_fn = hydra.utils.call(
             cfg_dict["objective"],
+            idm=self.idm,
+            idm_weight=idm_weight,
         )
 
         self.data_preprocessor = Preprocessor(
@@ -357,7 +371,6 @@ class PlanWorkspace:
             file.write(json.dumps(logs_entry) + "\n")
         return logs
 
-
 def load_ckpt(snapshot_path, device):
     from models.dino import DinoV2Encoder
     _ = DinoV2Encoder('dinov2_vits14', 'x_norm_patchtokens')
@@ -372,7 +385,31 @@ def load_ckpt(snapshot_path, device):
     result["epoch"] = payload["epoch"]
     return result
 
+def load_idm(idm_ckpt_path, device):
+    idm_ckpt_path = Path(idm_ckpt_path).expanduser().resolve()
 
+    if not idm_ckpt_path.exists():
+        raise FileNotFoundError(
+            f"IDM checkpoint not found: {idm_ckpt_path}"
+        )
+
+    checkpoint = torch.load(
+        idm_ckpt_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    if "idm" not in checkpoint:
+        raise KeyError(
+            f"IDM checkpoint does not contain 'idm': {idm_ckpt_path}"
+        )
+
+    idm = checkpoint["idm"].to(device).eval()
+
+    for param in idm.parameters():
+        param.requires_grad = False
+
+    return idm
 def load_model(model_ckpt, train_cfg, num_action_repeat, device):
     result = {}
     if model_ckpt.exists():
